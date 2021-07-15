@@ -663,10 +663,13 @@ namespace Microsoft.AspNetCore.Routing.Internal
             };
 
             var httpContext = new DefaultHttpContext();
-            httpContext.Request.Headers["Content-Type"] = "application/json";
 
             var requestBodyBytes = JsonSerializer.SerializeToUtf8Bytes(originalTodo);
-            httpContext.Request.Body = new MemoryStream(requestBodyBytes);
+            var stream = new MemoryStream(requestBodyBytes);;
+            httpContext.Request.Body = stream;
+
+            httpContext.Request.Headers["Content-Type"] = "application/json";
+            httpContext.Request.Headers["Content-Length"] = stream.Length.ToString();
 
             var jsonOptions = new JsonOptions();
             jsonOptions.SerializerOptions.Converters.Add(new TodoJsonConverter());
@@ -701,7 +704,9 @@ namespace Microsoft.AspNetCore.Routing.Internal
 
             var requestDelegate = RequestDelegateFactory.Create(action);
 
-            await Assert.ThrowsAsync<JsonException>(() => requestDelegate(httpContext));
+            await requestDelegate(httpContext);
+
+            Assert.Equal(400, httpContext.Response.StatusCode);
         }
 
         [Fact]
@@ -765,6 +770,7 @@ namespace Microsoft.AspNetCore.Routing.Internal
 
             var httpContext = new DefaultHttpContext();
             httpContext.Request.Headers["Content-Type"] = "application/json";
+            httpContext.Request.Headers["Content-Length"] = "1";
             httpContext.Request.Body = new IOExceptionThrowingRequestBodyStream(ioException);
             httpContext.Features.Set<IHttpRequestLifetimeFeature>(new TestHttpRequestLifetimeFeature());
             httpContext.RequestServices = serviceCollection.BuildServiceProvider();
@@ -798,6 +804,7 @@ namespace Microsoft.AspNetCore.Routing.Internal
 
             var httpContext = new DefaultHttpContext();
             httpContext.Request.Headers["Content-Type"] = "application/json";
+            httpContext.Request.Headers["Content-Length"] = "1";
             httpContext.Request.Body = new IOExceptionThrowingRequestBodyStream(invalidDataException);
             httpContext.Features.Set<IHttpRequestLifetimeFeature>(new TestHttpRequestLifetimeFeature());
             httpContext.RequestServices = serviceCollection.BuildServiceProvider();
@@ -890,18 +897,6 @@ namespace Microsoft.AspNetCore.Routing.Internal
             await requestDelegate(httpContext);
 
             Assert.Same(myOriginalService, httpContext.Items["service"]);
-        }
-
-        [Theory]
-        [MemberData(nameof(FromServiceActions))]
-        public async Task RequestDelegateRequiresServiceForAllFromServiceParameters(Delegate action)
-        {
-            var httpContext = new DefaultHttpContext();
-            httpContext.RequestServices = new EmptyServiceProvider();
-
-            var requestDelegate = RequestDelegateFactory.Create(action);
-
-            await Assert.ThrowsAsync<InvalidOperationException>(() => requestDelegate(httpContext));
         }
 
         [Fact]
@@ -1352,6 +1347,246 @@ namespace Microsoft.AspNetCore.Routing.Internal
             var responseBody = Encoding.UTF8.GetString(responseBodyStream.ToArray());
 
             Assert.Equal("null", responseBody);
+        }
+
+        public static IEnumerable<object?[]> QueryParamOptionalityData
+        {
+            get
+            {
+                string requiredQueryParam(string name) => $"Hello {name}!";
+                string defaultValueQueryParam(string name = "DefaultName") => $"Hello {name}!";
+                string nullableQueryParam(string? name) => $"Hello {name}!";
+
+                return new List<object?[]>
+                {
+                    new object?[] { (Func<string, string>)requiredQueryParam, null, true},
+                    new object?[] { (Func<string, string>)requiredQueryParam, "TestName", false},
+                    new object?[] { (Func<string, string>)defaultValueQueryParam, null, false},
+                    new object?[] { (Func<string, string>)defaultValueQueryParam, "TestName", false},
+                    new object?[] { (Func<string?, string>)nullableQueryParam, null, false},
+                    new object?[] { (Func<string?, string>)nullableQueryParam, "TestName", false},
+                };
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(QueryParamOptionalityData))]
+        public async Task RequestDelegateHandlesQueryParamOptionality(Delegate @delegate, string? queryParam, bool isInvalid)
+        {
+            var httpContext = new DefaultHttpContext();
+            if (queryParam is not null)
+            {
+                httpContext.Request.Query = new QueryCollection(new Dictionary<string, StringValues>
+                {
+                    ["name"] = queryParam
+                });
+            }
+
+            var requestDelegate = RequestDelegateFactory.Create(@delegate);
+
+            await requestDelegate(httpContext);
+
+            Assert.Equal(isInvalid ? 400 : 200, httpContext.Response.StatusCode);
+        }
+
+        public static IEnumerable<object?[]> RouteParamOptionalityData
+        {
+            get
+            {
+                string requiredRouteParam(string name) => $"Hello {name}!";
+                string defaultValueRouteParam(string name = "DefaultName") => $"Hello {name}!";
+                string nullableRouteParam(string? name) => $"Hello {name}!";
+
+                return new List<object?[]>
+                {
+                    new object?[] { (Func<string, string>)requiredRouteParam, null, true},
+                    new object?[] { (Func<string, string>)requiredRouteParam, "TestName", false},
+                    new object?[] { (Func<string, string>)defaultValueRouteParam, null, false},
+                    new object?[] { (Func<string, string>)defaultValueRouteParam, "TestName", false},
+                    new object?[] { (Func<string?, string>)nullableRouteParam, null, false},
+                    new object?[] { (Func<string?, string>)nullableRouteParam, "TestName", false},
+                };
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(RouteParamOptionalityData))]
+        public async Task RequestDelegateHandlesRouteParamOptionality(Delegate @delegate, string? routeParam, bool isInvalid)
+        {
+            var httpContext = new DefaultHttpContext();
+            if (routeParam is not null)
+            {
+                httpContext.Request.RouteValues["name"] = routeParam;
+            }
+
+            var requestDelegate = RequestDelegateFactory.Create(@delegate);
+
+            await requestDelegate(httpContext);
+
+            Assert.Equal(isInvalid ? 400 : 200, httpContext.Response.StatusCode);
+        }
+
+        public static IEnumerable<object?[]> BodyParamOptionalityData
+        {
+            get
+            {
+                string requiredRouteParam(Todo name) => $"Hello {name}!";
+                string defaultValueRouteParam(Todo? name = null) => $"Hello {name}!";
+                string nullableRouteParam(Todo? name) => $"Hello {name}!";
+
+                return new List<object?[]>
+                {
+                    new object?[] { (Func<Todo, string>)requiredRouteParam, false, true},
+                    new object?[] { (Func<Todo, string>)requiredRouteParam, true, false},
+                    new object?[] { (Func<Todo, string>)defaultValueRouteParam, false, false},
+                    new object?[] { (Func<Todo, string>)defaultValueRouteParam, true, false},
+                    new object?[] { (Func<Todo?, string>)nullableRouteParam, false, false},
+                    new object?[] { (Func<Todo?, string>)nullableRouteParam, true, false},
+                };
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(BodyParamOptionalityData))]
+        public async Task RequestDelegateHandlesBodyParamOptionality(Delegate @delegate, bool hasBody, bool isInvalid)
+        {
+            var httpContext = new DefaultHttpContext();
+            httpContext.Request.Headers["Content-Type"] = "application/json";
+            if (hasBody)
+            {
+                var todo = new Todo() { Name = "Default Todo" };
+                var requestBodyBytes = JsonSerializer.SerializeToUtf8Bytes(todo);
+                var stream = new MemoryStream(requestBodyBytes);
+                httpContext.Request.Body = stream;
+                httpContext.Request.ContentLength = stream.Length;
+            }
+
+            var jsonOptions = new JsonOptions();
+            jsonOptions.SerializerOptions.Converters.Add(new TodoJsonConverter());
+
+            var mock = new Mock<IServiceProvider>();
+            mock.Setup(m => m.GetService(It.IsAny<Type>())).Returns<Type>(t =>
+            {
+                if (t == typeof(IOptions<JsonOptions>))
+                {
+                    return Options.Create(jsonOptions);
+                }
+                return null;
+            });
+            httpContext.RequestServices = mock.Object;
+
+            var requestDelegate = RequestDelegateFactory.Create(@delegate);
+
+            await requestDelegate(httpContext);
+
+            Assert.Equal(isInvalid ? 400 : 200, httpContext.Response.StatusCode);
+        }
+
+        public static IEnumerable<object?[]> ServiceParamOptionalityData
+        {
+            get
+            {
+                string requiredExplicitService([FromService] MyService name) => $"Hello {name}!";
+                string defaultValueExplicitServiceParam([FromService] MyService? name = null) => $"Hello {name}!";
+                string nullableExplicitServiceParam([FromService] MyService? name) => $"Hello {name}!";
+
+                return new List<object?[]>
+                {
+                    new object?[] { (Func<MyService, string>)requiredExplicitService, false, true},
+                    new object?[] { (Func<MyService, string>)requiredExplicitService, true, false},
+
+                    new object?[] { (Func<MyService, string>)defaultValueExplicitServiceParam, false, false},
+                    new object?[] { (Func<MyService, string>)defaultValueExplicitServiceParam, true, false},
+
+                    new object?[] { (Func<MyService?, string>)nullableExplicitServiceParam, false, false},
+                    new object?[] { (Func<MyService?, string>)nullableExplicitServiceParam, true, false},
+                };
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ServiceParamOptionalityData))]
+        public async Task RequestDelegateHandlesServiceParamOptionality(Delegate @delegate, bool hasService, bool isInvalid)
+        {
+            var httpContext = new DefaultHttpContext();
+            RequestDelegateFactoryOptions? options = null;
+            if (hasService)
+            {
+                var service = new MyService();
+                var serviceCollection = new ServiceCollection();
+                serviceCollection.AddSingleton(service);
+                serviceCollection.AddSingleton<IMyService>(service);
+                var services = serviceCollection.BuildServiceProvider();
+                var requestScoped = services.CreateScope();
+                httpContext.RequestServices = requestScoped.ServiceProvider;
+                options = new() { ServiceProvider = services };
+            }
+            else
+            {
+                httpContext.RequestServices = new EmptyServiceProvider();
+            }
+
+            var requestDelegate = RequestDelegateFactory.Create(@delegate, options);
+
+            if (!isInvalid)
+            {
+                await requestDelegate(httpContext);
+                Assert.Equal(200, httpContext.Response.StatusCode);
+            }
+            else
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(() => requestDelegate(httpContext));
+            }
+        }
+
+        public static IEnumerable<object?[]> ImplicitServiceParamOptionalityData
+        {
+            get
+            {
+                string requiredImplicitService(MyService name) => $"Hello {name}!";
+                string defaultValueImplicitServiceParam(MyService? name = null) => $"Hello {name}!";
+                string nullableImplicitServiceParam(MyService? name) => $"Hello {name}!";
+
+                return new List<object?[]>
+                {
+                    new object?[] { (Func<MyService, string>)requiredImplicitService, false, true},
+                    new object?[] { (Func<MyService, string>)requiredImplicitService, true, false},
+                
+                    new object?[] { (Func<MyService, string>)defaultValueImplicitServiceParam, false, false},
+                    new object?[] { (Func<MyService, string>)defaultValueImplicitServiceParam, true, false},
+
+                    new object?[] { (Func<MyService?, string>)nullableImplicitServiceParam, false, false},
+                    new object?[] { (Func<MyService?, string>)nullableImplicitServiceParam, true, false}
+                };
+            }
+        }
+
+        [Theory]
+        [MemberData(nameof(ImplicitServiceParamOptionalityData))]
+        public async Task RequestDelegateHandlesImplicitServiceParamOptionality(Delegate @delegate, bool hasService, bool isInvalid)
+        {
+            var httpContext = new DefaultHttpContext();
+            RequestDelegateFactoryOptions? options = null;
+            if (hasService)
+            {
+                var service = new MyService();
+                var serviceCollection = new ServiceCollection();
+                serviceCollection.AddSingleton(service);
+                serviceCollection.AddSingleton<IMyService>(service);
+                var services = serviceCollection.BuildServiceProvider();
+                var requestScoped = services.CreateScope();
+                httpContext.RequestServices = requestScoped.ServiceProvider;
+                options = new() { ServiceProvider = services };
+            }
+            else
+            {
+                httpContext.RequestServices = new EmptyServiceProvider();
+            }
+
+            var requestDelegate = RequestDelegateFactory.Create(@delegate, options);
+
+            await requestDelegate(httpContext);
+            Assert.Equal(isInvalid ? 400 : 200, httpContext.Response.StatusCode);
         }
 
         private class Todo : ITodo
